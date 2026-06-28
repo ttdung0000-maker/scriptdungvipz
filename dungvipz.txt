@@ -12,7 +12,6 @@ local data = util.data
 local playerItems = data.items or {}
 local playerStats = data.stats or {}
 
--- Auto detect: in hub or in game
 local inHub = pcall(function() return ReplicatedStorage.Remotes.Play ~= nil end)
 local create_room, start_remote
 if inHub then
@@ -69,16 +68,15 @@ local Window = Fluent:CreateWindow({
     MinimizeKey = Enum.KeyCode.LeftControl
 })
 
-local Tabs = { 
+local Tabs = {
     Main = Window:AddTab({ Title = "Evo Farm", Icon = "sword" }),
-    AutoJoin = Window:AddTab({ Title = "Auto Join", Icon = "door-open" })
+    AutoJoin = Window:AddTab({ Title = "Auto Join", Icon = "door-open" }),
 }
 
 local Options = Fluent.Options
 local selectedUnit = nil
 local units = {}
 local unitIds = {}
-
 local farming = false
 local autoJoinEnabled = false
 
@@ -106,14 +104,11 @@ for id, char in pairs(data.characters or {}) do
     if not char or not char.name then continue end
     if unitIds[char.name] then continue end
     unitIds[char.name] = true
-
     local template = findTemplate(char.name)
     if not template then continue end
-
     local evo = getEvoData(template)
     if not evo then continue end
     if not evo.cost or not evo.object then continue end
-
     local missingMats = {}
     for mat, needed in pairs(evo.cost) do
         local have = playerItems[mat] or playerStats[mat] or 0
@@ -157,7 +152,6 @@ local function saveAutoJoinConfig()
     local difficulty = Options.StageDiff and Options.StageDiff.Value or "Normal"
     local act = Options.StageAct and tonumber(Options.StageAct.Value) or 1
     local enabled = autoJoinEnabled
-    
     local config = { mode = mode, world = world, difficulty = difficulty, act = act, enabled = enabled }
     pcall(function() writefile("EFarmAutoJoin.txt", HttpService:JSONEncode(config)) end)
 end
@@ -183,10 +177,7 @@ local function saveUnitsList()
     if not hasWrite then return end
     local dataOut = {}
     for _, u in ipairs(units) do
-        dataOut[u.name] = {
-            level = u.level, shiny = u.shiny, traitStr = u.traitStr,
-            target = u.target, fullCost = u.fullCost
-        }
+        dataOut[u.name] = { level = u.level, shiny = u.shiny, traitStr = u.traitStr, target = u.target, fullCost = u.fullCost }
     end
     pcall(function() writefile("EFarmUnits.txt", HttpService:JSONEncode(dataOut)) end)
 end
@@ -246,8 +237,7 @@ else
             end
             units[#units+1] = {
                 name = name, level = level, shiny = shiny, traitStr = traitStr,
-                target = info.target or "?", missing = missing, numMissing = #missing,
-                fullCost = fullCost
+                target = info.target or "?", missing = missing, numMissing = #missing, fullCost = fullCost
             }
         end
         table.sort(units, function(a,b) return a.numMissing > b.numMissing end)
@@ -267,7 +257,7 @@ for _, u in ipairs(units) do
 end
 
 -- ===================================================================
--- CONFIG CHI TIẾT TAB 1: EVO FARM
+-- TAB 1: EVO FARM
 -- ===================================================================
 Tabs.Main:AddParagraph({
     Title = "Evo Material Farmer",
@@ -369,11 +359,11 @@ local autoFarmToggle = Tabs.Main:AddToggle("AutoFarm", {
 })
 
 -- ===================================================================
--- CONFIG CHI TIẾT TAB 2: AUTO JOIN
+-- TAB 2: AUTO JOIN
 -- ===================================================================
-Tabs.AutoJoin:AddParagraph({ 
-    Title = "Hệ thống thiết lập phòng chơi", 
-    Content = "Cấu hình tự chọn độc lập, máy sẽ tự lặp lại màn này không cần điều kiện kho đồ." 
+Tabs.AutoJoin:AddParagraph({
+    Title = "Hệ thống thiết lập phòng chơi",
+    Content = "Cấu hình tự chọn độc lập, máy sẽ tự lặp lại màn này không cần điều kiện kho đồ."
 })
 
 local stageModeDropdown = Tabs.AutoJoin:AddDropdown("StageMode", {
@@ -407,7 +397,158 @@ local autoJoinToggle = Tabs.AutoJoin:AddToggle("AutoJoinStage", {
 })
 
 -- ===================================================================
--- THUẬT TOÁN LOGIC XỬ LÝ VÀ ĐIỀU HƯỚNG REMOTES
+-- TAB 3: SQUAD SETUP
+-- ===================================================================
+local TabSquad = Window:AddTab({ Title = "Squad Setup", Icon = "users" })
+
+local upgradeRemote = ReplicatedStorage.Remotes.Characters:WaitForChild("upgrade")
+local spawnRemote2 = ReplicatedStorage.Remotes.Characters:WaitForChild("spawn")
+local autoplayRemote
+pcall(function() autoplayRemote = ReplicatedStorage.Remotes.Characters:WaitForChild("autoplay") end)
+
+local squadSlots = {
+    [1]={targetLevel=1,enabled=true},
+    [2]={targetLevel=1,enabled=true},
+    [3]={targetLevel=1,enabled=true},
+    [4]={targetLevel=1,enabled=true},
+    [5]={targetLevel=1,enabled=true},
+    [6]={targetLevel=1,enabled=true},
+}
+local isRunningSquad = false
+local autoPlayEnabled = false
+
+local function getLevelById(uid)
+    local lv = 0
+    pcall(function()
+        local d = require(utility).data
+        if d.characters and d.characters[uid] then lv = d.characters[uid].level or 0 end
+    end)
+    return lv
+end
+
+local function getSlotUnits()
+    local result = {}
+    pcall(function()
+        local d = require(utility).data
+        local list = {}
+        for id, char in pairs(d.characters or {}) do
+            if char and char.name then
+                table.insert(list, {id=id, name=char.name, level=char.level or 1})
+            end
+        end
+        table.sort(list, function(a,b) return a.name < b.name end)
+        for i=1, math.min(6, #list) do result[i] = list[i] end
+    end)
+    return result
+end
+
+local function runSquad()
+    isRunningSquad = true
+    local slotUnits = getSlotUnits()
+    local done = 0
+    for i=1,6 do
+        if not isRunningSquad then break end
+        local s = squadSlots[i]
+        if not s.enabled then continue end
+        local u = slotUnits[i]
+        if not u then
+            Fluent:Notify({Title="Slot "..i, Content="Không có unit!", Duration=2})
+            continue
+        end
+        local uid = u.id
+        local name = u.name
+        local targetLv = s.targetLevel
+        local currentLv = getLevelById(uid)
+        if currentLv < targetLv then
+            Fluent:Notify({Title="⬆ Slot "..i..": "..name, Content="Lv"..currentLv.." → Lv"..targetLv, Duration=3})
+            local maxLoop = math.max((targetLv - currentLv) * 10, 50)
+            local count = 0
+            while isRunningSquad and count < maxLoop do
+                currentLv = getLevelById(uid)
+                if currentLv >= targetLv then break end
+                pcall(function() upgradeRemote:FireServer(uid) end)
+                count = count + 1
+                task.wait(0.3)
+            end
+            task.wait(0.5)
+        end
+        if not isRunningSquad then break end
+        if getLevelById(uid) >= targetLv then
+            pcall(function() spawnRemote2:FireServer(uid) end)
+            task.wait(0.5)
+            Fluent:Notify({Title="✓ Slot "..i, Content="Spawn "..name.." xong!", Duration=2})
+            done = done + 1
+        else
+            Fluent:Notify({Title="✗ Slot "..i, Content=name.." chưa đủ cấp!", Duration=3})
+        end
+        task.wait(0.3)
+    end
+    isRunningSquad = false
+    Fluent:Notify({Title="✓ Squad xong!", Content="Hoàn thành "..done.."/6!", Duration=5})
+end
+
+TabSquad:AddInput("SquadLevel1",{Title="Slot 1 - Cấp mục tiêu",Default="1",Numeric=true,Finished=false})
+TabSquad:AddToggle("SquadOn1",{Title="Slot 1 - Bật/Tắt",Default=true}):OnChanged(function(v) squadSlots[1].enabled=v end)
+TabSquad:AddInput("SquadLevel2",{Title="Slot 2 - Cấp mục tiêu",Default="1",Numeric=true,Finished=false})
+TabSquad:AddToggle("SquadOn2",{Title="Slot 2 - Bật/Tắt",Default=true}):OnChanged(function(v) squadSlots[2].enabled=v end)
+TabSquad:AddInput("SquadLevel3",{Title="Slot 3 - Cấp mục tiêu",Default="1",Numeric=true,Finished=false})
+TabSquad:AddToggle("SquadOn3",{Title="Slot 3 - Bật/Tắt",Default=true}):OnChanged(function(v) squadSlots[3].enabled=v end)
+TabSquad:AddInput("SquadLevel4",{Title="Slot 4 - Cấp mục tiêu",Default="1",Numeric=true,Finished=false})
+TabSquad:AddToggle("SquadOn4",{Title="Slot 4 - Bật/Tắt",Default=true}):OnChanged(function(v) squadSlots[4].enabled=v end)
+TabSquad:AddInput("SquadLevel5",{Title="Slot 5 - Cấp mục tiêu",Default="1",Numeric=true,Finished=false})
+TabSquad:AddToggle("SquadOn5",{Title="Slot 5 - Bật/Tắt",Default=true}):OnChanged(function(v) squadSlots[5].enabled=v end)
+TabSquad:AddInput("SquadLevel6",{Title="Slot 6 - Cấp mục tiêu",Default="1",Numeric=true,Finished=false})
+TabSquad:AddToggle("SquadOn6",{Title="Slot 6 - Bật/Tắt",Default=true}):OnChanged(function(v) squadSlots[6].enabled=v end)
+
+TabSquad:AddButton({
+    Title = "▶ Chạy Squad",
+    Description = "Level up + Spawn tất cả slot đang bật",
+    Callback = function()
+        if isRunningSquad then
+            Fluent:Notify({Title="Đang chạy!",Content="Bấm Dừng trước.",Duration=3})
+            return
+        end
+        for i=1,6 do
+            if Options["SquadLevel"..i] then
+                squadSlots[i].targetLevel = tonumber(Options["SquadLevel"..i].Value) or 1
+            end
+        end
+        task.spawn(runSquad)
+    end
+})
+
+TabSquad:AddButton({
+    Title = "⏹ Dừng Squad",
+    Description = "Dừng ngay lập tức",
+    Callback = function()
+        isRunningSquad = false
+        Fluent:Notify({Title="Dừng",Content="Đã dừng Squad.",Duration=3})
+    end
+})
+
+TabSquad:AddDivider()
+
+TabSquad:AddToggle("AutoPlayToggle",{
+    Title = "⚡ Auto Play",
+    Description = "Tự động bật autoplay trong trận",
+    Default = false,
+}):OnChanged(function(val)
+    autoPlayEnabled = val
+    if val then
+        task.spawn(function()
+            while autoPlayEnabled do
+                pcall(function() if autoplayRemote then autoplayRemote:FireServer() end end)
+                task.wait(3)
+            end
+        end)
+        Fluent:Notify({Title="Auto Play",Content="Đã bật!",Duration=2})
+    else
+        Fluent:Notify({Title="Auto Play",Content="Đã tắt.",Duration=2})
+    end
+end)
+
+-- ===================================================================
+-- LOGIC REMOTES (GIỮ NGUYÊN TỪ CODE GỐC)
 -- ===================================================================
 local function setFarmOff()
     farming = false
@@ -432,7 +573,6 @@ local function enterGame(u)
     local drop, matName = getFirstDrop(u)
     if not drop then return false end
     saveCurrentFarmedMat(matName or "")
-    
     local act = drop.acts and drop.acts[#drop.acts] or drop.act or 1
     local diff = diffDropdown.Value
     local ok, err = create_room:InvokeServer({
@@ -440,7 +580,6 @@ local function enterGame(u)
         mode = drop.mode, only_friends = false, world = drop.world
     })
     if not ok then return false end
-    print("Farming: " .. matName .. " at " .. drop.world .. " A" .. act .. " " .. drop.mode)
     task.wait(1.5)
     pcall(function() start_remote:InvokeServer() end)
     return true
@@ -451,16 +590,13 @@ local function enterGameManual()
     local world = stageMapDropdown.Value
     local diff = stageDiffDropdown.Value
     local act = tonumber(stageActDropdown.Value) or 1
-    
     saveCurrentFarmedMat("MANUAL_STAGE")
     saveAutoJoinConfig()
-
     local ok, err = create_room:InvokeServer({
         boosted = true, act = act, difficulty = diff,
         mode = mode, only_friends = false, world = world
     })
     if not ok then return false end
-    print("Auto Join Stage: " .. world .. " - Mode: " .. mode .. " - Act: " .. tostring(act) .. " [" .. diff .. "]")
     task.wait(1.5)
     pcall(function() start_remote:InvokeServer() end)
     return true
@@ -479,11 +615,9 @@ local function scanRewards(endScreen)
             if qty and qty > 0 then
                 local name = child.Name
                 if playerItems[name] ~= nil then
-                    playerItems[name] = (playerItems[name] or 0) + qty
-                    added = true
+                    playerItems[name] = (playerItems[name] or 0) + qty; added = true
                 elseif playerStats[name] ~= nil then
-                    playerStats[name] = (playerStats[name] or 0) + qty
-                    added = true
+                    playerStats[name] = (playerStats[name] or 0) + qty; added = true
                 end
             end
         end
@@ -498,12 +632,7 @@ pcall(function() gameTeleport = ReplicatedStorage.Remotes.Players:WaitForChild("
 
 if gameEnding then
     gameEnding.OnClientEvent:Connect(function()
-        -- FIX CHÍNH: Nếu cả 2 đều tắt, lập tức hủy xử lý để không bị ép buộc Replay
-        if not autoJoinEnabled and not farming then
-            print("Hệ thống tự động đang TẮT. Dừng gửi lệnh Replay lên Server.")
-            return
-        end
-
+        if not autoJoinEnabled and not farming then return end
         local endScreen = nil
         local playerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
         for i = 1, 10 do
@@ -514,45 +643,30 @@ if gameEnding then
             end
             task.wait(0.5)
         end
-
         if not endScreen then
             if gameReplay then
                 if autoJoinEnabled or farming then pcall(function() gameReplay:FireServer() end) end
             end
             return
         end
-
         pcall(scanRewards, endScreen)
-
-        -- Ưu tiên 1: Auto Join Stage thủ công ở Tab 2
         if autoJoinEnabled then
             if gameReplay then pcall(function() gameReplay:FireServer() end) end
             return
         end
-
-        -- Ưu tiên 2: Auto Farm Unit ở Tab 1
         if not farming then return end
-
         local u = selectedUnit
-        if u then
-            pcall(refreshData, u)
-            pcall(logMaterialStatus, u)
-        end
-
+        if u then pcall(refreshData, u); pcall(logMaterialStatus, u) end
         if not u or u.numMissing == 0 then
             setFarmOff()
             if gameTeleport then pcall(function() gameTeleport:FireServer() end) end
             return
         end
-
-        -- FIX ĐỒNG BỘ: Đọc trực tiếp vật phẩm đang theo dõi từ file lưu cấu hình
         local trackedMat = loadCurrentFarmedMat()
         local curMatDone = true
-        
         if trackedMat and trackedMat ~= "" and trackedMat ~= "MANUAL_STAGE" then
             local neededAmount = u.fullCost[trackedMat] or 0
             local currentHave = playerItems[trackedMat] or playerStats[trackedMat] or 0
-            -- Kiểm tra chuẩn xác số lượng thực tế trong túi đồ
             if currentHave < neededAmount then curMatDone = false end
         else
             local _, fallbackMat = getFirstDrop(u)
@@ -562,12 +676,9 @@ if gameEnding then
                 curMatDone = false
             end
         end
-
         if curMatDone then
-            -- Thực sự đủ nguyên liệu mới cho thoát phòng để đổi map
             if gameTeleport then pcall(function() gameTeleport:FireServer() end) end
         else
-            -- Chưa đủ nguyên liệu, tiếp tục replay cày tiếp màn hiện tại
             if gameReplay and farming then pcall(function() gameReplay:FireServer() end) end
         end
     end)
@@ -576,13 +687,9 @@ end
 local function doFarmLoop()
     local u = selectedUnit
     if not u then setFarmOff(); return end
-
-    refreshData(u)
-    logMaterialStatus(u)
-
+    refreshData(u); logMaterialStatus(u)
     if u.numMissing == 0 then setFarmOff(); return end
     if not getFirstDrop(u) then setFarmOff(); return end
-
     if inHub and create_room and start_remote then
         if not enterGame(u) then setFarmOff(); return end
     end
@@ -601,22 +708,16 @@ unitDropdown:OnChanged(function(val)
     selectedUnit = u
     if u then
         saveSelectedUnitName(u.name)
-        pcall(refreshData, u)
-        pcall(showUnitInfo, u)
-        pcall(logMaterialStatus, u)
-        if farming and inHub and u.numMissing > 0 then
-            task.spawn(doFarmLoop)
-        end
+        pcall(refreshData, u); pcall(showUnitInfo, u); pcall(logMaterialStatus, u)
+        if farming and inHub and u.numMissing > 0 then task.spawn(doFarmLoop) end
     end
 end)
 
 autoFarmToggle:OnChanged(function(value)
     if value and autoJoinEnabled then
         Fluent:Notify({ Title = "Xung đột", Content = "Vui lòng tắt Auto Join Stage trước!", Duration = 4 })
-        autoFarmToggle:SetValue(false)
-        return
+        autoFarmToggle:SetValue(false); return
     end
-
     farming = value
     if value then
         if inHub then
@@ -632,24 +733,21 @@ end)
 autoJoinToggle:OnChanged(function(value)
     if value and farming then
         Fluent:Notify({ Title = "Xung đột", Content = "Vui lòng tắt Auto Farm bên Tab 1 trước!", Duration = 4 })
-        autoJoinToggle:SetValue(false)
-        return
+        autoJoinToggle:SetValue(false); return
     end
-
     autoJoinEnabled = value
     saveAutoJoinConfig()
-
     if value then
-        if inHub then
-            task.spawn(doAutoJoinLoop)
-        else
-            Fluent:Notify({ Title = "Auto Join Stage", Content = "Đang trong game - Sẽ tự động Replay khi hết trận.", Duration = 4 })
-        end
+        if inHub then task.spawn(doAutoJoinLoop)
+        else Fluent:Notify({ Title = "Auto Join Stage", Content = "Đang trong game - Sẽ tự động Replay khi hết trận.", Duration = 4 }) end
     else
         Fluent:Notify({ Title = "Hệ thống", Content = "Đã hủy chu kỳ Auto Join Stage.", Duration = 3 })
     end
 end)
 
+-- ===================================================================
+-- TAB SETTINGS (GIỮ NGUYÊN NHƯ CODE GỐC)
+-- ===================================================================
 local TabsS = Window:AddTab({ Title = "Settings", Icon = "settings" })
 SaveManager:SetLibrary(Fluent)
 InterfaceManager:SetLibrary(Fluent)
@@ -663,10 +761,8 @@ SaveManager:BuildConfigSection(TabsS)
 Window:SelectTab(1)
 SaveManager:LoadAutoloadConfig()
 
--- KHỞI TẠO ĐỒNG BỘ CONFIG CŨ CHUẨN XÁC
 task.spawn(function()
     task.wait(0.5)
-    
     local savedJoin = loadAutoJoinConfig()
     if savedJoin then
         pcall(function() stageModeDropdown:SetValue(savedJoin.mode) end)
@@ -674,20 +770,14 @@ task.spawn(function()
         pcall(function() stageDiffDropdown:SetValue(savedJoin.difficulty) end)
         pcall(function() stageActDropdown:SetValue(tostring(savedJoin.act)) end)
         task.wait(0.2)
-        if savedJoin.enabled and not farming then
-            autoJoinToggle:SetValue(true)
-        end
+        if savedJoin.enabled and not farming then autoJoinToggle:SetValue(true) end
     end
-
     if not selectedUnit then
         local savedName = loadSelectedUnitName()
         if savedName ~= "" and unitByName[savedName] then
             selectedUnit = unitByName[savedName]
             for key, u in pairs(unitMap) do
-                if u == selectedUnit then
-                    unitDropdown:SetValue(key)
-                    break
-                end
+                if u == selectedUnit then unitDropdown:SetValue(key); break end
             end
         end
     end
@@ -698,208 +788,5 @@ task.spawn(function()
         task.spawn(doAutoJoinLoop)
     end
 end)
--- ===================================================================
--- TAB 3: AUTO LEVEL UP & SPAWN UNIT
--- ===================================================================
-local TabLvUp = Window:AddTab({ Title = "Level & Spawn", Icon = "star" })
 
-TabLvUp:AddParagraph({
-    Title = "Auto Level Up & Spawn",
-    Content = "Tự động nâng cấp unit lên cấp mục tiêu, sau đó spawn ra."
-})
-
--- Remote cần thiết
-local levelRemote, spawnRemote
-pcall(function() levelRemote = ReplicatedStorage.Remotes.Characters:WaitForChild("level_up") end)
-pcall(function() spawnRemote = ReplicatedStorage.Remotes.Characters:WaitForChild("spawn") end)
-
--- Dropdown chọn unit để level up (dùng lại unitNames từ Tab 1)
-local lvUnitDropdown = TabLvUp:AddDropdown("LvUnitSelect", {
-    Title = "Chọn Unit cần nâng cấp",
-    Values = unitNames, Multi = false, Default = 1,
-})
-
-local targetLevelInput = TabLvUp:AddInput("TargetLevel", {
-    Title = "Cấp mục tiêu",
-    Description = "Nhập cấp bạn muốn nâng lên (VD: 50, 100...)",
-    Default = "100",
-    Numeric = true,
-    Finished = false,
-})
-
-local autoSpawnToggle = TabLvUp:AddToggle("AutoSpawnAfter", {
-    Title = "Tự động Spawn sau khi đủ cấp",
-    Description = "Spawn unit ra ngay khi đạt cấp mục tiêu",
-    Default = true,
-})
-
-local isLeveling = false
-local selectedLvUnit = nil
-
-lvUnitDropdown:OnChanged(function(val)
-    selectedLvUnit = unitMap[val]
-end)
-
-local function getCurrentLevel(unit)
-    if not unit then return 0 end
-    -- Đọc lại level thực tế từ data
-    pcall(function()
-        local m = require(utility)
-        local d = m.data
-        for id, char in pairs(d.characters or {}) do
-            if char.name == unit.name then
-                unit.level = char.level or unit.level
-                return
-            end
-        end
-    end)
-    return unit.level or 0
-end
-
-local function doLevelUp(unit, targetLv)
-    if not unit then
-        Fluent:Notify({ Title = "Lỗi", Content = "Chưa chọn unit!", Duration = 3 })
-        return
-    end
-    if not levelRemote then
-        Fluent:Notify({ Title = "Lỗi", Content = "Không tìm thấy remote level_up!", Duration = 3 })
-        return
-    end
-
-    isLeveling = true
-    local currentLv = getCurrentLevel(unit)
-
-    Fluent:Notify({
-        Title = "Bắt đầu Level Up",
-        Content = unit.name .. " | Lv" .. currentLv .. " -> Lv" .. targetLv,
-        Duration = 4
-    })
-
-    local loopCount = 0
-    while isLeveling do
-        currentLv = getCurrentLevel(unit)
-        if currentLv >= targetLv then break end
-
-        -- Kiểm tra đủ Gold/EXP không (tránh spam vô ích)
-        local gold = playerStats["Gold"] or playerItems["Gold"] or 0
-        if gold <= 0 then
-            Fluent:Notify({ Title = "Hết Gold", Content = "Không đủ Gold để tiếp tục level up!", Duration = 4 })
-            break
-        end
-
-        local ok, err = pcall(function()
-            levelRemote:InvokeServer({ characterId = unit.id or unit.name })
-        end)
-
-        if not ok then
-            -- Thử FireServer nếu InvokeServer không hoạt động
-            pcall(function()
-                levelRemote:FireServer({ characterId = unit.id or unit.name })
-            end)
-        end
-
-        loopCount = loopCount + 1
-
-        -- Cập nhật data mỗi 10 lần
-        if loopCount % 10 == 0 then
-            pcall(function()
-                local m = require(utility)
-                local d = m.data
-                playerItems = d.items or {}
-                playerStats = d.stats or {}
-            end)
-            currentLv = getCurrentLevel(unit)
-            Fluent:Notify({
-                Title = "Đang Level Up...",
-                Content = unit.name .. " | Lv" .. currentLv .. "/" .. targetLv,
-                Duration = 2
-            })
-        end
-
-        task.wait(0.1) -- Tránh kick do spam request
-    end
-
-    isLeveling = false
-    currentLv = getCurrentLevel(unit)
-
-    if currentLv >= targetLv then
-        Fluent:Notify({
-            Title = "✓ Hoàn thành!",
-            Content = unit.name .. " đã đạt Lv" .. currentLv,
-            Duration = 5
-        })
-        -- Auto Spawn nếu bật
-        if autoSpawnToggle.Value and spawnRemote then
-            task.wait(0.5)
-            pcall(function()
-                spawnRemote:FireServer({ characterId = unit.id or unit.name })
-            end)
-            Fluent:Notify({ Title = "Spawn", Content = "Đã spawn " .. unit.name .. " ra!", Duration = 3 })
-        end
-    else
-        Fluent:Notify({
-            Title = "Dừng lại",
-            Content = unit.name .. " dừng ở Lv" .. currentLv .. "/" .. targetLv,
-            Duration = 4
-        })
-    end
-end
-
-TabLvUp:AddButton({
-    Title = "▶ Bắt đầu Level Up",
-    Description = "Nâng cấp unit đã chọn lên cấp mục tiêu",
-    Callback = function()
-        if isLeveling then
-            Fluent:Notify({ Title = "Đang chạy", Content = "Quá trình level up đang diễn ra!", Duration = 3 })
-            return
-        end
-        local targetLv = tonumber(Options.TargetLevel.Value) or 100
-        if not selectedLvUnit then
-            Fluent:Notify({ Title = "Lỗi", Content = "Vui lòng chọn unit trước!", Duration = 3 })
-            return
-        end
-        task.spawn(function() doLevelUp(selectedLvUnit, targetLv) end)
-    end
-})
-
-TabLvUp:AddButton({
-    Title = "⏹ Dừng Level Up",
-    Description = "Dừng quá trình đang chạy",
-    Callback = function()
-        isLeveling = false
-        Fluent:Notify({ Title = "Dừng", Content = "Đã dừng Level Up.", Duration = 3 })
-    end
-})
-
-TabLvUp:AddDivider()
-
--- Spawn thủ công riêng biệt
-local spawnUnitDropdown = TabLvUp:AddDropdown("SpawnUnitSelect", {
-    Title = "Spawn Unit thủ công",
-    Values = unitNames, Multi = false, Default = 1,
-})
-
-local selectedSpawnUnit = nil
-spawnUnitDropdown:OnChanged(function(val)
-    selectedSpawnUnit = unitMap[val]
-end)
-
-TabLvUp:AddButton({
-    Title = "⚡ Spawn Unit",
-    Description = "Spawn unit đã chọn ra ngay lập tức",
-    Callback = function()
-        if not selectedSpawnUnit then
-            Fluent:Notify({ Title = "Lỗi", Content = "Chưa chọn unit để spawn!", Duration = 3 })
-            return
-        end
-        if not spawnRemote then
-            Fluent:Notify({ Title = "Lỗi", Content = "Không tìm thấy remote spawn!", Duration = 3 })
-            return
-        end
-        pcall(function()
-            spawnRemote:FireServer({ characterId = selectedSpawnUnit.id or selectedSpawnUnit.name })
-        end)
-        Fluent:Notify({ Title = "Spawn", Content = "Đã spawn " .. selectedSpawnUnit.name, Duration = 3 })
-    end
-})
-Fluent:Notify({ Title = "Hệ thống", Content = "Đã sửa hoàn toàn lỗi thông báo ảo và khóa bật tắt Toggle!", Duration = 5 })
+Fluent:Notify({ Title = "Hệ thống", Content = "Script đã load xong!", Duration = 5 })
